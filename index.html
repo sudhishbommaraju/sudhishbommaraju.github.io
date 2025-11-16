@@ -1,0 +1,276 @@
+# sudhishbommaraju.github.io
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Safepath</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+        header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        .container {
+            display: flex;
+            height: calc(100vh - 80px);
+        }
+        .sidebar {
+            width: 300px;
+            background-color: white;
+            padding: 20px;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            overflow-y: auto;
+        }
+        .map {
+            flex: 1;
+            height: 100%;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        .route-option {
+            padding: 10px;
+            margin: 5px 0;
+            background-color: #ecf0f1;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .route-option:hover {
+            background-color: #d5dbdb;
+        }
+        .route-option.selected {
+            background-color: #3498db;
+            color: white;
+        }
+        #crime-stats {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #e8f4fd;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Safepath</h1>
+        <p>Find the safest and quickest paths using latest crime data</p>
+    </header>
+    <div class="container">
+        <div class="sidebar">
+            <input type="text" id="start" placeholder="Start location (e.g., New York, NY)">
+            <input type="text" id="end" placeholder="End location (e.g., Los Angeles, CA)">
+            <button onclick="findPaths()">Find Paths</button>
+            <div id="routes"></div>
+            <div id="crime-stats"></div>
+        </div>
+        <div id="map" class="map"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+    <script>
+        let map;
+        let markers = [];
+        let routes = [];
+        let crimes = [];
+
+        const API_KEY = 'YOUR_CRIMEOMETER_API_KEY'; // Replace if you get a real key
+
+        // Mock crime data
+        const mockCrimes = [
+            {lat: 40.7128, lng: -74.0060, type: 'Theft', desc: 'Theft reported'},
+            {lat: 40.7130, lng: -74.0050, type: 'Assault', desc: 'Assault incident'},
+            {lat: 34.0522, lng: -118.2437, type: 'Robbery', desc: 'Robbery in LA'},
+            {lat: 41.8781, lng: -87.6298, type: 'Assault', desc: 'Chicago assault'},
+            {lat: 29.7604, lng: -95.3698, type: 'Burglary', desc: 'Burglary in Houston'},
+            {lat: 37.7749, lng: -122.4194, type: 'Theft', desc: 'Theft in SF'}
+        ];
+
+        async function fetchCrimes(lat, lon) {
+            if (!API_KEY || API_KEY === 'YOUR_CRIMEOMETER_API_KEY') {
+                console.warn("Using mock crime data");
+                return mockCrimes;
+            }
+            return mockCrimes;
+        }
+
+        function initMap() {
+            map = L.map('map').setView([37.0902, -95.7129], 4);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+        }
+
+        async function geocode(address) {
+            const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.length === 0) throw new Error("Location not found");
+            return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+        }
+
+        async function getRoute(coords, alternatives = true) {
+            const alt = alternatives ? "&alternatives=true" : "";
+            const url = `https://router.project-osrm.org/route/v1/driving/${coords.join(';')}?overview=full${alt}&geometries=geojson`;
+
+            const res = await fetch(url);
+            const data = await res.json();
+            if (!data.routes || data.routes.length === 0) throw new Error("No routes found");
+            return data.routes;
+        }
+
+        function calculateSafetyScore(route, crimes) {
+            let score = 0;
+            const line = turf.lineString(route.geometry.coordinates);
+
+            crimes.forEach(c => {
+                const point = turf.point([c.lng, c.lat]);
+                const dist = turf.distance(point, line, { units: 'kilometers' });
+                if (dist < 1) score++;
+            });
+
+            return score;
+        }
+
+        function addCrimeMarkers(crimes) {
+            markers.forEach(m => map.removeLayer(m));
+            markers = [];
+
+            crimes.forEach(c => {
+                const marker = L.marker([c.lat, c.lng]).addTo(map)
+                    .bindPopup(`<b>${c.type}</b><br>${c.desc}`);
+                markers.push(marker);
+            });
+        }
+
+        async function findPaths() {
+            const startAddr = document.getElementById('start').value;
+            const endAddr = document.getElementById('end').value;
+
+            if (!startAddr || !endAddr) {
+                alert("Enter both start and end locations.");
+                return;
+            }
+
+            try {
+                const start = await geocode(startAddr);
+                const end = await geocode(endAddr);
+
+                const midLat = (start.lat + end.lat) / 2;
+                const midLng = (start.lng + end.lng) / 2;
+                crimes = await fetchCrimes(midLat, midLng);
+
+                addCrimeMarkers(crimes);
+
+                routes.forEach(r => map.removeLayer(r));
+                routes = [];
+
+                const coordString = [
+                    `${start.lng},${start.lat}`,
+                    `${end.lng},${end.lat}`
+                ];
+
+                const routeData = await getRoute(coordString, true);
+
+                let routeOptions = [];
+                let shortest = Infinity, quickest = Infinity, safest = Infinity;
+                let shortestIndex = 0, quickestIndex = 0, safestIndex = 0;
+
+                routeData.forEach((route, i) => {
+                    const dist = route.distance / 1000;
+                    const time = route.duration / 60;
+                    const safety = calculateSafetyScore(route, crimes);
+
+                    const poly = L.geoJSON(route.geometry).addTo(map)
+                        .setStyle({ color: "#3498db", weight: 5 });
+                    routes.push(poly);
+
+                    routeOptions.push({ i, dist, time, safety });
+
+                    if (dist < shortest) { shortest = dist; shortestIndex = i; }
+                    if (time < quickest) { quickest = time; quickestIndex = i; }
+                    if (safety < safest) { safest = safety; safestIndex = i; }
+                });
+
+                const group = L.featureGroup(routes);
+                map.fitBounds(group.getBounds());
+
+                displayRoutes(routeOptions, shortestIndex, quickestIndex, safestIndex);
+
+                document.getElementById("crime-stats").innerHTML = `
+                    <strong>Crime Stats Loaded:</strong><br>
+                    ${crimes.length} incidents loaded near this route.
+                `;
+
+            } catch (err) {
+                alert("Error: " + err.message);
+            }
+        }
+
+        function displayRoutes(options, shortestIndex, quickestIndex, safestIndex) {
+            const box = document.getElementById("routes");
+            let html = "";
+
+            options.forEach(opt => {
+                let label = `Route ${opt.i + 1}`;
+                if (opt.i === shortestIndex) label += " (Shortest)";
+                if (opt.i === quickestIndex) label += " (Quickest)";
+                if (opt.i === safestIndex) label += " (Safest)";
+
+                html += `
+                    <div class="route-option" onclick="selectRoute(${opt.i})">
+                        <strong>${label}</strong><br>
+                        Distance: ${opt.dist.toFixed(1)} km | 
+                        Time: ${opt.time.toFixed(1)} min | 
+                        Crimes nearby: ${opt.safety}
+                    </div>
+                `;
+            });
+
+            box.innerHTML = html;
+        }
+
+        function selectRoute(index) {
+            routes.forEach((r, i) => {
+                r.setStyle({
+                    color: i === index ? "#e74c3c" : "#3498db",
+                    weight: i === index ? 7 : 5
+                });
+            });
+
+            document.querySelectorAll(".route-option").forEach((el, i) => {
+                el.classList.toggle("selected", i === index);
+            });
+        }
+
+        initMap();
+    </script>
+</body>
+</html>
