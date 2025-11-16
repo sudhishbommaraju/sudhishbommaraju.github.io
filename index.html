@@ -6,18 +6,20 @@
     <title>Safepath</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
     <style>
-        body { margin:0; background:#f4f4f4; font-family:Arial; }
-        header { background:#2c3e50; color:white; padding:20px; text-align:center; }
+        body { margin:0; background:#f4f4f4; font-family:Arial,sans-serif; }
+        header { background:#2c3e50; padding:20px; color:#fff; text-align:center; }
         .container { display:flex; height:calc(100vh - 80px); }
-        .sidebar { width:300px; background:white; padding:20px; overflow-y:auto; }
+        .sidebar { width:300px; background:#fff; padding:20px; overflow-y:auto; box-shadow:2px 0 5px rgba(0,0,0,.1); }
         .map { flex:1; height:100%; }
-        input { width:100%; padding:10px; margin-top:10px; border:1px solid #ccc; border-radius:4px; }
-        button { width:100%; padding:12px; background:#3498db; color:white; border:none; margin-top:10px; border-radius:4px; cursor:pointer; }
-        button:hover { background:#2980b9; }
+        input { width:100%; padding:10px; margin:10px 0; border-radius:4px; border:1px solid #ccc; }
+        button { width:100%; padding:12px; background:#3498db; border:none; color:#fff; cursor:pointer; border-radius:4px; }
+        button:hover:not(:disabled){ background:#2980b9; }
         button:disabled { background:#95a5a6; cursor:not-allowed; }
-        .route-option { padding:10px; margin:5px 0; background:#ecf0f1; cursor:pointer; border-radius:4px; }
-        .route-option.selected { background:#3498db; color:white; }
-        #travel-time { margin-top:10px; font-weight:bold; color:#2c3e50; }
+        .route-option { padding:10px; margin:5px 0; background:#ecf0f1; border-radius:4px; cursor:pointer; }
+        .route-option:hover { background:#d5dbdb; }
+        .route-option.selected { background:#3498db; color:#fff; }
+        #travel-time { margin-top:8px; font-weight:bold; color:#2c3e50; }
+        #crime-stats { margin-top:20px; padding:10px; background:#e8f4fd; border-radius:4px; }
     </style>
 </head>
 <body>
@@ -28,106 +30,232 @@
 
 <div class="container">
     <div class="sidebar">
-        <input id="start" placeholder="UCLA – Los Angeles, CA">
-        <input id="end"   placeholder="ASU – Tempe, AZ">
+        <input id="start" placeholder="UCLA – 405 Hilgard Ave, Los Angeles, CA">
+        <input id="end"   placeholder="ASU – 1151 S Forest Ave, Tempe, AZ">
         <div id="travel-time"></div>
         <button id="findBtn" onclick="findPaths()">Find Paths</button>
+
         <div id="routes"></div>
+        <div id="crime-stats"></div>
     </div>
     <div id="map" class="map"></div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 <script>
-/* ---------- CONFIG ---------- */
+/* ===============================
+   CONFIG
+   =============================== */
+const ALTERNATIVES = 3;
 const OSRM_BASE = "https://router.project-osrm.org";
 
-/* ---------- GLOBALS ---------- */
-let map, routeLayers = [], btn;
+/* ===============================
+   MOCK CRIME DATA
+   =============================== */
+const mockCrimes = [
+    {lat:34.0689,lng:-118.4452,type:"Theft",desc:"UCLA campus theft"},
+    {lat:34.0522,lng:-118.2437,type:"Burglary",desc:"Downtown LA burglary"},
+    {lat:33.4484,lng:-112.0740,type:"Robbery",desc:"Phoenix robbery"},
+    {lat:33.4242,lng:-111.9281,type:"Assault",desc:"Tempe assault near ASU"},
+    {lat:33.3062,lng:-111.8412,type:"Vandalism",desc:"Mesa vandalism"}
+];
 
-/* ---------- MAP ---------- */
+/* ===============================
+   GLOBALS
+   =============================== */
+let map, routeLayers=[], crimeMarkers=[], btn;
+
+/* ===============================
+   MAP INIT
+   =============================== */
 function initMap() {
-    map = L.map("map").setView([37, -95], 4);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OpenStreetMap contributors"
+    map = L.map('map').setView([37.0902, -95.7129], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+        attribution:'&copy; OpenStreetMap contributors'
     }).addTo(map);
 }
 
-/* ---------- GEOCODE ---------- */
-async function geocode(addr) {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1`;
+/* ===============================
+   GEOCODING
+   =============================== */
+async function geocode(q){
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`;
     const r = await fetch(url);
-    if (!r.ok) throw new Error("Geocoding service error");
-    const j = await r.json();
-    if (!j.length) throw new Error("Location not found");
-    return { lat: +j[0].lat, lng: +j[0].lon };
+    if(!r.ok) throw new Error('Geocoding error');
+    const d = await r.json();
+    if(!d.length) throw new Error('Location not found');
+    return {lat:+d[0].lat, lng:+d[0].lon};
 }
 
-/* ---------- OSRM ROUTE ---------- */
-async function getRoute(start, end) {
+/* ===============================
+   ROUTING (OSRM)
+   =============================== */
+async function getRoutes(start,end){
     const url = `${OSRM_BASE}/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}`
-              + `?overview=full&geometries=geojson`;
+               + `?overview=full&geometries=geojson&alternatives=${ALTERNATIVES}`;
     const r = await fetch(url);
-    if (!r.ok) {
-        const txt = await r.text();
-        throw new Error(`OSRM ${r.status}: ${txt}`);
-    }
-    const data = await r.json();
-    if (!data.routes || !data.routes.length) throw new Error("No route returned");
-    return data.routes[0];   // first (fastest) route
+    if(!r.ok) throw new Error('Routing failed');
+    const j = await r.json();
+    return j.routes || [];
 }
 
-/* ---------- DRAW ---------- */
-function clearRoutes() {
-    routeLayers.forEach(l => map.removeLayer(l));
-    routeLayers = [];
+/* ===============================
+   GEOMETRY
+   =============================== */
+function extractCoords(route){
+    const g = route.geometry;
+    if(g.type==='LineString') return g.coordinates;
+    if(g.type==='MultiLineString') return g.coordinates[0];
+    throw new Error('Unsupported geometry');
 }
-function drawRoute(route) {
-    clearRoutes();
-    const coords = route.geometry.coordinates.map(c => [c[1], c[0]]); // [lng,lat] to [lat,lng]
-    const poly = L.polyline(coords, { color: "black", weight: 6, opacity: 0.9 }).addTo(map);
+
+/* ===============================
+   SAFETY SCORE
+   =============================== */
+function safetyScore(coords){
+    const line = turf.lineString(coords);
+    let s=0;
+    mockCrimes.forEach(c=>{
+        if(turf.distance(turf.point([c.lng,c.lat]),line,{units:'kilometers'})<1) s++;
+    });
+    return s;
+}
+
+/* ===============================
+   MARKERS
+   =============================== */
+function addCrimeMarkers(){
+    crimeMarkers.forEach(m=>map.removeLayer(m));
+    crimeMarkers=[];
+    mockCrimes.forEach(c=>{
+        crimeMarkers.push(L.marker([c.lat,c.lng]).addTo(map)
+            .bindPopup(`<b>${c.type}</b><br>${c.desc}`));
+    });
+}
+
+/* ===============================
+   ROUTE DRAWING
+   =============================== */
+function clearRoutes(){
+    routeLayers.forEach(l=>map.removeLayer(l));
+    routeLayers=[];
+}
+function drawRoute(route,style){
+    const coords = extractCoords(route);
+    const latlngs = coords.map(c=>[c[1],c[0]]); // OSRM: [lng,lat] → [lat,lng]
+    const poly = L.polyline(latlngs,style).addTo(map);
     routeLayers.push(poly);
-    map.fitBounds(poly.getBounds(), { padding: [50, 50] });
+    return poly;
+}
+function fitRoutes(){
+    if(!routeLayers.length) return;
+    const g = L.featureGroup(routeLayers);
+    map.fitBounds(g.getBounds(),{padding:[50,50]});
 }
 
-/* ---------- TIME DISPLAY ---------- */
-function showTravelTime(seconds) {
-    const totalMin = Math.round(seconds / 60);
-    const hrs = Math.floor(totalMin / 60);
-    const mins = totalMin % 60;
-    document.getElementById("travel-time").innerHTML =
-        `Estimated Time: <b>${hrs ? hrs + " hr " : ""}${mins} min</b>`;
-}
+/* ===============================
+   MAIN
+   =============================== */
+async function findPaths(){
+    const startTxt = document.getElementById('start').value.trim() || document.getElementById('start').placeholder;
+    const endTxt   = document.getElementById('end').value.trim()   || document.getElementById('end').placeholder;
 
-/* ---------- MAIN ---------- */
-async function findPaths() {
-    const startTxt = document.getElementById("start").value.trim() || document.getElementById("start").placeholder;
-    const endTxt   = document.getElementById("end").value.trim()   || document.getElementById("end").placeholder;
+    btn.disabled=true; btn.textContent='Working…';
+    document.getElementById('travel-time').textContent='';
 
-    btn.disabled = true;
-    btn.textContent = "Working…";
-    document.getElementById("travel-time").textContent = "";
-
-    try {
+    try{
         const start = await geocode(startTxt);
         const end   = await geocode(endTxt);
-        const route = await getRoute(start, end);
 
-        drawRoute(route);
-        showTravelTime(route.duration);
+        addCrimeMarkers();
+        clearRoutes();
 
-    } catch (e) {
-        alert("Error: " + e.message);
+        const routes = await getRoutes(start,end);
+        if(!routes.length) throw new Error('No routes');
+
+        const details = routes.map((r,i)=>{
+            const coords = extractCoords(r);
+            const distKm = r.distance/1000;
+            const timeMin = r.duration/60;
+            const score = safetyScore(coords);
+            return {i,route:r,coords,distKm,timeMin,score};
+        });
+
+        // ---- draw all routes ----
+        details.forEach((r,i)=>{
+            drawRoute(r.route,{
+                color: i===0 ? '#000' : '#3498db',   // BLACK for selected
+                weight: i===0 ? 8 : 5,
+                opacity: 0.85
+            });
+        });
+        fitRoutes();
+
+        // ---- show travel time (selected route) ----
+        const selected = details[0];
+        const hrs = Math.floor(selected.timeMin/60);
+        const mins = Math.round(selected.timeMin%60);
+        document.getElementById('travel-time').innerHTML = 
+            `<strong>Estimated time:</strong> ${hrs?hrs+' h ':''}${mins} min`;
+
+        // ---- sidebar list ----
+        document.getElementById('routes').innerHTML = details.map(r=>{
+            let label = `Route ${r.i+1}`;
+            if(r.i===details.reduce((a,b)=>a.distKm<b.distKm?a:b).i) label+=' (Shortest)';
+            if(r.i===details.reduce((a,b)=>a.timeMin<b.timeMin?a:b).i) label+=' (Quickest)';
+            if(r.i===details.reduce((a,b)=>a.score<b.score?a:b).i)   label+=' (Safest)';
+            return `
+                <div class="route-option ${r.i===0?'selected':''}" onclick="selectRoute(${r.i})">
+                    <strong>${label}</strong><br>
+                    Distance: ${r.distKm.toFixed(1)} km<br>
+                    Time: ${Math.floor(r.timeMin/60)} h ${Math.round(r.timeMin%60)} min<br>
+                    Crimes near: ${r.score}
+                </div>`;
+        }).join('');
+
+        document.getElementById('crime-stats').innerHTML=
+            `<strong>Crime Stats:</strong><br>${mockCrimes.length} demo incidents.`;
+
+    }catch(e){
+        alert('Error: '+e.message);
         console.error(e);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = "Find Paths";
+    }finally{
+        btn.disabled=false; btn.textContent='Find Paths';
     }
 }
 
-/* ---------- INIT ---------- */
-window.onload = () => {
-    btn = document.getElementById("findBtn");
+/* ===============================
+   SELECT ROUTE
+   =============================== */
+function selectRoute(i){
+    routeLayers.forEach((l,idx)=>{
+        const sel = idx===i;
+        l.setStyle({
+            color: sel ? '#000' : '#3498db',   // BLACK when selected
+            weight: sel ? 8 : 5
+        });
+        if(sel) l.bringToFront();
+    });
+    document.querySelectorAll('.route-option').forEach((el,idx)=>
+        el.classList.toggle('selected',idx===i)
+    );
+
+    // update travel-time for newly selected route
+    const info = routeLayers[i]._info;
+    if(info){
+        const hrs = Math.floor(info.timeMin/60);
+        const mins = Math.round(info.timeMin%60);
+        document.getElementById('travel-time').innerHTML = 
+            `<strong>Estimated time:</strong> ${hrs?hrs+' h ':''}${mins} min`;
+    }
+}
+
+/* ===============================
+   INIT
+   =============================== */
+window.onload = ()=>{
+    btn = document.getElementById('findBtn');
     initMap();
 };
 </script>
