@@ -15,18 +15,12 @@
         .sidebar { width:300px; background:#fff; padding:20px; overflow-y:auto; box-shadow:2px 0 5px rgba(0,0,0,0.1); }
         .map { flex:1; height:100%; }
 
-        input {
-            width:100%; padding:10px; margin:10px 0;
-            border-radius:4px; border:1px solid #ccc;
-        }
-
+        input { width:100%; padding:10px; margin:10px 0; border-radius:4px; border:1px solid #ccc; }
         button {
-            width:100%; padding:12px;
-            background:#3498db; border:none;
-            color:#fff; cursor:pointer; border-radius:4px;
+            width:100%; padding:12px; background:#3498db;
+            border:none; color:#fff; cursor:pointer; border-radius:4px;
         }
-
-        button:hover { background:#2980b9; }
+        button:hover:not(:disabled) { background:#2980b9; }
         button:disabled { background:#95a5a6; cursor:not-allowed; }
 
         .route-option {
@@ -44,7 +38,6 @@
 </head>
 
 <body>
-
 <header>
     <h1>Safepath</h1>
     <p>Find the safest and quickest paths using latest crime data</p>
@@ -53,7 +46,7 @@
 <div class="container">
     <div class="sidebar">
         <input id="start" placeholder="UCLA – 405 Hilgard Ave, Los Angeles, CA">
-        <input id="end" placeholder="ASU – 1151 S Forest Ave, Tempe, AZ">
+        <input id="end"   placeholder="ASU – 1151 S Forest Ave, Tempe, AZ">
 
         <button id="findBtn" onclick="findPaths()">Find Paths</button>
 
@@ -68,40 +61,24 @@
 <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
 <script>
-/* ===============================
-       CONFIGURATION
-   =============================== */
-
-const ORS_KEY = "YOUR_REAL_ORS_KEY_HERE";   // <--- PUT KEY HERE
+/* CONFIG */
+const ORS_KEY = ""; // optional
+const USE_ORS = ORS_KEY.trim() !== "";
 const ALTERNATIVES = 3;
 
-const USE_ORS = ORS_KEY && ORS_KEY.trim() !== "";
-
-/* ===============================
-       MOCK CRIME DATA
-   =============================== */
-
+/* DEMO CRIMES */
 const mockCrimes = [
-    {lat:34.0689, lng:-118.4452, type:"Theft",     desc:"UCLA campus theft"},
-    {lat:34.0522, lng:-118.2437, type:"Burglary",  desc:"Downtown LA burglary"},
-    {lat:33.4484, lng:-112.0740, type:"Robbery",   desc:"Phoenix robbery"},
-    {lat:33.4242, lng:-111.9281, type:"Assault",   desc:"Tempe assault near ASU"},
+    {lat:34.0689, lng:-118.4452, type:"Theft", desc:"UCLA campus theft"},
+    {lat:34.0522, lng:-118.2437, type:"Burglary", desc:"Downtown LA burglary"},
+    {lat:33.4484, lng:-112.0740, type:"Robbery", desc:"Phoenix robbery"},
+    {lat:33.4242, lng:-111.9281, type:"Assault", desc:"Tempe assault"},
     {lat:33.3062, lng:-111.8412, type:"Vandalism", desc:"Mesa vandalism"}
 ];
 
-/* ===============================
-        GLOBALS
-   =============================== */
+/* GLOBALS */
+let map, routeLayers=[], crimeMarkers=[], btn;
 
-let map;
-let routeLayers = [];
-let crimeMarkers = [];
-let btn;
-
-/* ===============================
-          MAP INIT
-   =============================== */
-
+/* INIT MAP */
 function initMap() {
     map = L.map("map").setView([37.0902, -95.7129], 4);
 
@@ -110,228 +87,198 @@ function initMap() {
     }).addTo(map);
 }
 
-/* ===============================
-         GEOCODING
-   =============================== */
-
+/* GEOCODING */
 async function geocode(query) {
+    if (!query.trim()) throw new Error("Empty address");
     const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`;
-
     const res = await fetch(url);
     if (!res.ok) throw new Error("Geocoding error");
-
     const data = await res.json();
     if (!data.length) throw new Error("Location not found: " + query);
-
-    return { lat: +data[0].lat, lng: +data[0].lon };
+    return { lat:+data[0].lat, lng:+data[0].lon };
 }
 
-/* ===============================
-         ROUTING (ORS)
-   =============================== */
+/* ROUTING */
+async function getRoutes(start, end) {
+    if (USE_ORS) {
+        const body = {
+            coordinates: [[start.lng, start.lat], [end.lng, end.lat]],
+            preference: "fastest",
+            options: { alternatives: ALTERNATIVES }
+        };
 
-async function routeORS(start, end) {
-    const body = {
-        coordinates: [
-            [start.lng, start.lat],
-            [end.lng, end.lat]
-        ],
-        preference: "fastest",
-        options: { alternatives: ALTERNATIVES }
-    };
+        const res = await fetch(
+            "https://api.openrouteservice.org/v2/directions/driving-car?api_key=" + ORS_KEY,
+            {
+                method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify(body)
+            }
+        );
 
-    const res = await fetch(
-        "https://api.openrouteservice.org/v2/directions/driving-car?api_key=" + ORS_KEY,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body)
-        }
-    );
+        if (!res.ok) throw new Error("ORS error");
 
-    if (!res.ok) {
-        const txt = await res.text();
-        throw new Error("ORS error " + res.status + ": " + txt);
+        const json = await res.json();
+        return json.features;
     }
 
+    // OSRM fallback
+    const url =
+      `https://routing.openstreetmap.de/routed-car/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}` +
+      `?overview=full&geometries=geojson&steps=true`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("OSRM routing failed");
+
     const json = await res.json();
-    return json.features || [];
+    return json.routes;
 }
 
-/* ===============================
-      GEOMETRY FIXER
-   =============================== */
-
-function getLineCoords(feature) {
+/* GEOMETRY FIX */
+function extractCoordinates(feature) {
     const g = feature.geometry;
-
-    if (!g) throw new Error("No geometry");
+    if (!g) throw new Error("Missing geometry");
 
     if (g.type === "LineString") return g.coordinates;
     if (g.type === "MultiLineString") return g.coordinates[0];
 
-    if (Array.isArray(g.coordinates)) return g.coordinates;
-
-    throw new Error("Unsupported geometry: " + g.type);
+    throw new Error("Unsupported geometry type: " + g.type);
 }
 
-/* ===============================
-       SAFETY SCORE
-   =============================== */
-
+/* SAFETY SCORE */
 function safetyScore(coords) {
     const line = turf.lineString(coords);
     let score = 0;
 
     mockCrimes.forEach(c => {
-        const d = turf.distance(turf.point([c.lng, c.lat]), line, { units: "kilometers" });
+        const d = turf.distance(turf.point([c.lng, c.lat]), line, {units:"kilometers"});
         if (d < 1) score++;
     });
 
     return score;
 }
 
-/* ===============================
-       MARKERS
-   =============================== */
-
+/* MARKERS */
 function addCrimeMarkers() {
     crimeMarkers.forEach(m => map.removeLayer(m));
     crimeMarkers = [];
 
     mockCrimes.forEach(c => {
         crimeMarkers.push(
-            L.marker([c.lat, c.lng])
-             .addTo(map)
-             .bindPopup(`<b>${c.type}</b><br>${c.desc}`)
+            L.marker([c.lat, c.lng]).addTo(map)
+            .bindPopup(`<b>${c.type}</b><br>${c.desc}`)
         );
     });
 }
 
-/* ===============================
-       ROUTE DRAWING
-   =============================== */
+/* ROUTE DRAWING — FIXED VERSION */
+function drawRoute(feature, style) {
+    // ALWAYS manually convert OSRM/ORS coords
+    const coords = extractCoordinates(feature);
+    const latlngs = coords.map(c => [c[1], c[0]]); // fix lng/lat → lat/lng
+
+    const poly = L.polyline(latlngs, style).addTo(map);
+    routeLayers.push(poly);
+    return poly;
+}
 
 function clearRoutes() {
     routeLayers.forEach(l => map.removeLayer(l));
     routeLayers = [];
 }
 
-function drawRoute(feature, style) {
-    const coords = getLineCoords(feature);
-
-    const geojson = {
-        type: "Feature",
-        geometry: { type: "LineString", coordinates: coords }
-    };
-
-    const layer = L.geoJSON(geojson, { style }).addTo(map);
-    routeLayers.push(layer);
-    return layer;
-}
-
 function fitAllRoutes() {
     if (!routeLayers.length) return;
-    const group = L.featureGroup(routeLayers);
-    map.fitBounds(group.getBounds(), { padding: [50, 50] });
+    const g = L.featureGroup(routeLayers);
+    map.fitBounds(g.getBounds(), {padding:[50,50]});
 }
 
-/* ===============================
-            MAIN
-   =============================== */
-
+/* MAIN */
 async function findPaths() {
-    const startAddr = document.getElementById("start").value || document.getElementById("start").placeholder;
-    const endAddr   = document.getElementById("end").value   || document.getElementById("end").placeholder;
+    const startText = document.getElementById("start").value || document.getElementById("start").placeholder;
+    const endText   = document.getElementById("end").value   || document.getElementById("end").placeholder;
 
     btn.disabled = true;
     btn.textContent = "Working…";
 
     try {
-        const start = await geocode(startAddr);
-        const end = await geocode(endAddr);
+        const start = await geocode(startText);
+        const end   = await geocode(endText);
 
         addCrimeMarkers();
         clearRoutes();
 
-        const routes = await routeORS(start, end);
+        const routes = await getRoutes(start, end);
         if (!routes.length) throw new Error("No routes returned");
 
-        const info = routes.map((f, i) => {
-            const coords = getLineCoords(f);
+        const info = routes.map((f,i) => {
+            const coords = extractCoordinates(f);
+            const dist = f.distance ? f.distance : f.properties.summary.distance;
+            const time = f.duration ? f.duration : f.properties.summary.duration;
+            const score = safetyScore(coords);
+
             return {
                 i,
-                feature: f,
+                feature:f,
                 coords,
-                distKm: f.properties.summary.distance / 1000,
-                timeMin: f.properties.summary.duration / 60,
-                score: safetyScore(coords)
+                distKm: dist/1000,
+            timeMin: time/60,
+                score
             };
         });
 
-        // Draw routes
-        info.forEach((r, i) => {
+        // Draw them
+        info.forEach((r,i) => {
             drawRoute(r.feature, {
-                color: i === 0 ? "#e74c3c" : "#3498db",
-                weight: i === 0 ? 7 : 5
+                color: i===0 ? "#e74c3c" : "#3498db",
+                weight: i===0 ? 7 : 5
             });
         });
 
         fitAllRoutes();
 
-        document.getElementById("routes").innerHTML = info.map(r => {
-            return `
-                <div class="route-option ${r.i === 0 ? "selected" : ""}" onclick="selectRoute(${r.i})">
-                    <strong>Route ${r.i + 1}</strong><br>
-                    Distance: ${r.distKm.toFixed(1)} km<br>
-                    Time: ${r.timeMin.toFixed(0)} min<br>
-                    Crimes nearby: ${r.score}
-                </div>
-            `;
-        }).join("");
+        // Sidebar listing
+        document.getElementById("routes").innerHTML =
+            info.map(r => `
+            <div class="route-option ${r.i===0?'selected':''}" onclick="selectRoute(${r.i})">
+                <strong>Route ${r.i+1}</strong><br>
+                Distance: ${r.distKm.toFixed(1)} km<br>
+                Time: ${r.timeMin.toFixed(0)} min<br>
+                Crimes: ${r.score}
+            </div>`).join("");
 
-        document.getElementById("crime-stats").innerHTML = `
-            <strong>Crime Stats:</strong><br>
-            ${mockCrimes.length} demo incidents loaded.
-        `;
+        document.getElementById("crime-stats").innerHTML =
+            `<strong>Crime Stats:</strong><br>${mockCrimes.length} demo incidents loaded.`;
 
-    } catch (err) {
+    } catch(err) {
         alert("Error: " + err.message);
         console.error(err);
-
-    } finally {
-        btn.disabled = false;
-        btn.textContent = "Find Paths";
     }
+
+    btn.disabled = false;
+    btn.textContent = "Find Paths";
 }
 
-/* ===============================
-       SELECT ROUTE
-   =============================== */
-
+/* SELECT ROUTE */
 function selectRoute(i) {
     routeLayers.forEach((layer, idx) => {
         layer.setStyle({
-            color: idx === i ? "#e74c3c" : "#3498db",
-            weight: idx === i ? 7 : 5
+            color: idx===i ? "#e74c3c" : "#3498db",
+            weight: idx===i ? 7 : 5
         });
-        if (idx === i) layer.bringToFront();
+        if (idx===i) layer.bringToFront();
     });
 
     document.querySelectorAll(".route-option").forEach((el, idx) =>
-        el.classList.toggle("selected", idx === i)
+        el.classList.toggle("selected", idx===i)
     );
 }
 
-/* ===============================
-         INIT
-   =============================== */
-
+/* INIT */
 window.onload = () => {
     btn = document.getElementById("findBtn");
     initMap();
 };
-
 </script>
 
 </body>
