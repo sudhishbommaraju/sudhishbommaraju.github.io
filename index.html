@@ -1,30 +1,26 @@
-# sudhishbommaraju.github.io
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Safepath</title>
-
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-
     <style>
         body { margin:0; background:#f4f4f4; font-family:Arial; }
         header { background:#2c3e50; color:white; padding:20px; text-align:center; }
         .container { display:flex; height:calc(100vh - 80px); }
         .sidebar { width:300px; background:white; padding:20px; overflow-y:auto; }
         .map { flex:1; height:100%; }
-
-        input { width:100%; padding:10px; margin-top:10px; }
-        button { width:100%; padding:12px; background:#3498db; color:white; border:none; margin-top:10px; }
+        input { width:100%; padding:10px; margin-top:10px; border:1px solid #ccc; border-radius:4px; }
+        button { width:100%; padding:12px; background:#3498db; color:white; border:none; margin-top:10px; border-radius:4px; cursor:pointer; }
         button:hover { background:#2980b9; }
-
-        .route-option { padding:10px; margin:5px 0; background:#ecf0f1; cursor:pointer; }
+        button:disabled { background:#95a5a6; cursor:not-allowed; }
+        .route-option { padding:10px; margin:5px 0; background:#ecf0f1; cursor:pointer; border-radius:4px; }
         .route-option.selected { background:#3498db; color:white; }
+        #travel-time { margin-top:10px; font-weight:bold; color:#2c3e50; }
     </style>
 </head>
 <body>
-
 <header>
     <h1>Safepath</h1>
     <p>Find the safest and quickest paths using latest crime data</p>
@@ -34,93 +30,106 @@
     <div class="sidebar">
         <input id="start" placeholder="UCLA – Los Angeles, CA">
         <input id="end"   placeholder="ASU – Tempe, AZ">
-
-        <div id="travel-time" style="margin-top:10px; font-weight:bold;"></div>
-
+        <div id="travel-time"></div>
         <button id="findBtn" onclick="findPaths()">Find Paths</button>
         <div id="routes"></div>
     </div>
-
     <div id="map" class="map"></div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
 <script>
+/* ---------- CONFIG ---------- */
+const OSRM_BASE = "https://router.project-osrm.org";
 
-/* ---- CORS SAFE OSRM ROUTING ---- */
-const OSRM = "https://api.allorigins.win/raw?url=" +
-             encodeURIComponent("https://router.project-osrm.org");
+/* ---------- GLOBALS ---------- */
+let map, routeLayers = [], btn;
 
-/* ---- Map ---- */
-let map = L.map("map").setView([37, -95], 4);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+/* ---------- MAP ---------- */
+function initMap() {
+    map = L.map("map").setView([37, -95], 4);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+}
 
-let routeLayers = [];
-
-/* ---- Geocode ---- */
+/* ---------- GEOCODE ---------- */
 async function geocode(addr) {
     const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1`;
-    let r = await fetch(url);
-    let j = await r.json();
-    return { lat:+j[0].lat, lng:+j[0].lon };
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("Geocoding service error");
+    const j = await r.json();
+    if (!j.length) throw new Error("Location not found");
+    return { lat: +j[0].lat, lng: +j[0].lon };
 }
 
-/* ---- OSRM Route Fetch ---- */
+/* ---------- OSRM ROUTE ---------- */
 async function getRoute(start, end) {
-    let url =
-      `${OSRM}/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`;
-
-    let r = await fetch(url);
-    let j = await r.json();
-    return j.routes[0]; // guaranteed
+    const url = `${OSRM_BASE}/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}`
+              + `?overview=full&geometries=geojson`;
+    const r = await fetch(url);
+    if (!r.ok) {
+        const txt = await r.text();
+        throw new Error(`OSRM ${r.status}: ${txt}`);
+    }
+    const data = await r.json();
+    if (!data.routes || !data.routes.length) throw new Error("No route returned");
+    return data.routes[0];   // first (fastest) route
 }
 
-/* ---- Draw Route ---- */
-function drawRoute(route) {
+/* ---------- DRAW ---------- */
+function clearRoutes() {
     routeLayers.forEach(l => map.removeLayer(l));
     routeLayers = [];
-
-    const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
-    const polyline = L.polyline(coords, { color:"black", weight:6 }).addTo(map);
-    routeLayers.push(polyline);
-
-    map.fitBounds(polyline.getBounds());
+}
+function drawRoute(route) {
+    clearRoutes();
+    const coords = route.geometry.coordinates.map(c => [c[1], c[0]]); // [lng,lat] to [lat,lng]
+    const poly = L.polyline(coords, { color: "black", weight: 6, opacity: 0.9 }).addTo(map);
+    routeLayers.push(poly);
+    map.fitBounds(poly.getBounds(), { padding: [50, 50] });
 }
 
-/* ---- Show Travel Time ---- */
-function showTravelTime(durationSeconds) {
-    const min = Math.round(durationSeconds / 60);
-    const hr  = Math.floor(min / 60);
-    const rem = min % 60;
-
+/* ---------- TIME DISPLAY ---------- */
+function showTravelTime(seconds) {
+    const totalMin = Math.round(seconds / 60);
+    const hrs = Math.floor(totalMin / 60);
+    const mins = totalMin % 60;
     document.getElementById("travel-time").innerHTML =
-      `Estimated Time: <b>${hr ? hr + " hr " : ""}${rem} min</b>`;
+        `Estimated Time: <b>${hrs ? hrs + " hr " : ""}${mins} min</b>`;
 }
 
-/* ---- Main ---- */
+/* ---------- MAIN ---------- */
 async function findPaths() {
+    const startTxt = document.getElementById("start").value.trim() || document.getElementById("start").placeholder;
+    const endTxt   = document.getElementById("end").value.trim()   || document.getElementById("end").placeholder;
 
-    const startAddr = document.getElementById("start").value || document.getElementById("start").placeholder;
-    const endAddr   = document.getElementById("end").value   || document.getElementById("end").placeholder;
+    btn.disabled = true;
+    btn.textContent = "Working…";
+    document.getElementById("travel-time").textContent = "";
 
     try {
-        const start = await geocode(startAddr);
-        const end   = await geocode(endAddr);
-
+        const start = await geocode(startTxt);
+        const end   = await geocode(endTxt);
         const route = await getRoute(start, end);
 
         drawRoute(route);
-
         showTravelTime(route.duration);
 
     } catch (e) {
         alert("Error: " + e.message);
         console.error(e);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Find Paths";
     }
 }
 
+/* ---------- INIT ---------- */
+window.onload = () => {
+    btn = document.getElementById("findBtn");
+    initMap();
+};
 </script>
-
 </body>
 </html>
