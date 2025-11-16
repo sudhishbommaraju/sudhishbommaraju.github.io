@@ -6,13 +6,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Safepath</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
     <style>
         body {
             font-family: Arial, sans-serif;
             margin: 0;
             padding: 0;
             background-color: #f4f4f4;
-            color: #333;
         }
         header {
             background-color: #2c3e50;
@@ -31,11 +31,7 @@
             box-shadow: 2px 0 5px rgba(0,0,0,0.1);
             overflow-y: auto;
         }
-        .map {
-            flex: 1;
-            height: 100%;
-        }
-        input[type="text"] {
+        input {
             width: 100%;
             padding: 10px;
             margin: 10px 0;
@@ -48,47 +44,45 @@
             background-color: #3498db;
             color: white;
             border: none;
-            border-radius: 4px;
             cursor: pointer;
+            border-radius: 4px;
         }
         button:hover {
             background-color: #2980b9;
+        }
+        .map {
+            flex: 1;
+            height: 100%;
         }
         .route-option {
             padding: 10px;
             margin: 5px 0;
             background-color: #ecf0f1;
-            border-radius: 4px;
             cursor: pointer;
-        }
-        .route-option:hover {
-            background-color: #d5dbdb;
+            border-radius: 4px;
         }
         .route-option.selected {
             background-color: #3498db;
             color: white;
         }
-        #crime-stats {
-            margin-top: 20px;
-            padding: 10px;
-            background-color: #e8f4fd;
-            border-radius: 4px;
-        }
     </style>
 </head>
+
 <body>
     <header>
         <h1>Safepath</h1>
         <p>Find the safest and quickest paths using latest crime data</p>
     </header>
+
     <div class="container">
         <div class="sidebar">
-            <input type="text" id="start" placeholder="Start location (e.g., New York, NY)">
-            <input type="text" id="end" placeholder="End location (e.g., Los Angeles, CA)">
+            <input id="start" placeholder="Start location (e.g., New York, NY)">
+            <input id="end" placeholder="End location (e.g., Los Angeles, CA)">
             <button onclick="findPaths()">Find Paths</button>
             <div id="routes"></div>
-            <div id="crime-stats"></div>
+            <div id="crime-stats" style="margin-top:20px;"></div>
         </div>
+
         <div id="map" class="map"></div>
     </div>
 
@@ -97,136 +91,130 @@
 
     <script>
         let map;
-        let markers = [];
-        let routes = [];
-        let crimes = [];
+        let routeLayers = [];
+        let crimeMarkers = [];
 
-        const API_KEY = 'YOUR_CRIMEOMETER_API_KEY'; // Replace if you get a real key
+        const ORS_API_KEY = "YOUR_ORS_KEY_HERE";
 
-        // Mock crime data
         const mockCrimes = [
-            {lat: 40.7128, lng: -74.0060, type: 'Theft', desc: 'Theft reported'},
-            {lat: 40.7130, lng: -74.0050, type: 'Assault', desc: 'Assault incident'},
-            {lat: 34.0522, lng: -118.2437, type: 'Robbery', desc: 'Robbery in LA'},
-            {lat: 41.8781, lng: -87.6298, type: 'Assault', desc: 'Chicago assault'},
-            {lat: 29.7604, lng: -95.3698, type: 'Burglary', desc: 'Burglary in Houston'},
-            {lat: 37.7749, lng: -122.4194, type: 'Theft', desc: 'Theft in SF'}
+            { lat: 40.7128, lng: -74.0060, type: "Theft", desc: "Theft in NYC" },
+            { lat: 34.0522, lng: -118.2437, type: "Robbery", desc: "Robbery in LA" },
+            { lat: 41.8781, lng: -87.6298, type: "Assault", desc: "Assault in Chicago" },
+            { lat: 37.7749, lng: -122.4194, type: "Theft", desc: "Theft in SF" }
         ];
 
-        async function fetchCrimes(lat, lon) {
-            if (!API_KEY || API_KEY === 'YOUR_CRIMEOMETER_API_KEY') {
-                console.warn("Using mock crime data");
-                return mockCrimes;
-            }
-            return mockCrimes;
-        }
-
         function initMap() {
-            map = L.map('map').setView([37.0902, -95.7129], 4);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; OpenStreetMap contributors'
-            }).addTo(map);
+            map = L.map("map").setView([37.0902, -95.7129], 4);
+            L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png")
+                .addTo(map);
         }
 
-        async function geocode(address) {
-            const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
+        async function geocode(query) {
+            const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`;
             const res = await fetch(url);
             const data = await res.json();
             if (data.length === 0) throw new Error("Location not found");
-            return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+
+            return {
+                lat: parseFloat(data[0].lat),
+                lng: parseFloat(data[0].lon)
+            };
         }
 
-        async function getRoute(coords, alternatives = true) {
-            const alt = alternatives ? "&alternatives=true" : "";
-            const url = `https://router.project-osrm.org/route/v1/driving/${coords.join(';')}?overview=full${alt}&geometries=geojson`;
+        async function getRoutesORS(start, end) {
+            const body = {
+                coordinates: [
+                    [start.lng, start.lat],
+                    [end.lng, end.lat]
+                ],
+                instructions: false
+            };
 
-            const res = await fetch(url);
+            const res = await fetch("https://api.openrouteservice.org/v2/directions/driving-car", {
+                method: "POST",
+                headers: {
+                    "Authorization": ORS_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(body)
+            });
+
             const data = await res.json();
-            if (!data.routes || data.routes.length === 0) throw new Error("No routes found");
-            return data.routes;
+
+            return [data.features[0]];
         }
 
-        function calculateSafetyScore(route, crimes) {
-            let score = 0;
-            const line = turf.lineString(route.geometry.coordinates);
+        function addCrimeMarkers() {
+            crimeMarkers.forEach(m => map.removeLayer(m));
+            crimeMarkers = [];
 
-            crimes.forEach(c => {
+            mockCrimes.forEach(c => {
+                const marker = L.marker([c.lat, c.lng]).addTo(map)
+                    .bindPopup(`<b>${c.type}</b><br>${c.desc}`);
+                crimeMarkers.push(marker);
+            });
+        }
+
+        function calculateSafetyScore(routeGeoJSON) {
+            const line = turf.lineString(routeGeoJSON.geometry.coordinates);
+            let score = 0;
+
+            mockCrimes.forEach(c => {
                 const point = turf.point([c.lng, c.lat]);
-                const dist = turf.distance(point, line, { units: 'kilometers' });
+                const dist = turf.distance(point, line, { units: "kilometers" });
+
                 if (dist < 1) score++;
             });
 
             return score;
         }
 
-        function addCrimeMarkers(crimes) {
-            markers.forEach(m => map.removeLayer(m));
-            markers = [];
+        function drawRoutes(routes) {
+            routeLayers.forEach(r => map.removeLayer(r));
+            routeLayers = [];
 
-            crimes.forEach(c => {
-                const marker = L.marker([c.lat, c.lng]).addTo(map)
-                    .bindPopup(`<b>${c.type}</b><br>${c.desc}`);
-                markers.push(marker);
+            routes.forEach((route, index) => {
+                const layer = L.geoJSON(route, {
+                    style: { color: "#3498db", weight: 5 }
+                }).addTo(map);
+
+                routeLayers.push(layer);
             });
+
+            const group = L.featureGroup(routeLayers);
+            map.fitBounds(group.getBounds());
         }
 
         async function findPaths() {
-            const startAddr = document.getElementById('start').value;
-            const endAddr = document.getElementById('end').value;
+            const s = document.getElementById("start").value;
+            const e = document.getElementById("end").value;
 
-            if (!startAddr || !endAddr) {
-                alert("Enter both start and end locations.");
+            if (!s || !e) {
+                alert("Enter both start and end");
                 return;
             }
 
             try {
-                const start = await geocode(startAddr);
-                const end = await geocode(endAddr);
+                const start = await geocode(s);
+                const end = await geocode(e);
 
-                const midLat = (start.lat + end.lat) / 2;
-                const midLng = (start.lng + end.lng) / 2;
-                crimes = await fetchCrimes(midLat, midLng);
+                addCrimeMarkers();
 
-                addCrimeMarkers(crimes);
+                const routes = await getRoutesORS(start, end);
 
-                routes.forEach(r => map.removeLayer(r));
-                routes = [];
+                const routeOptions = routes.map((r, i) => ({
+                    index: i,
+                    distance: r.properties.summary.distance / 1000,
+                    time: r.properties.summary.duration / 60,
+                    safety: calculateSafetyScore(r)
+                }));
 
-                const coordString = [
-                    `${start.lng},${start.lat}`,
-                    `${end.lng},${end.lat}`
-                ];
-
-                const routeData = await getRoute(coordString, true);
-
-                let routeOptions = [];
-                let shortest = Infinity, quickest = Infinity, safest = Infinity;
-                let shortestIndex = 0, quickestIndex = 0, safestIndex = 0;
-
-                routeData.forEach((route, i) => {
-                    const dist = route.distance / 1000;
-                    const time = route.duration / 60;
-                    const safety = calculateSafetyScore(route, crimes);
-
-                    const poly = L.geoJSON(route.geometry).addTo(map)
-                        .setStyle({ color: "#3498db", weight: 5 });
-                    routes.push(poly);
-
-                    routeOptions.push({ i, dist, time, safety });
-
-                    if (dist < shortest) { shortest = dist; shortestIndex = i; }
-                    if (time < quickest) { quickest = time; quickestIndex = i; }
-                    if (safety < safest) { safest = safety; safestIndex = i; }
-                });
-
-                const group = L.featureGroup(routes);
-                map.fitBounds(group.getBounds());
-
-                displayRoutes(routeOptions, shortestIndex, quickestIndex, safestIndex);
+                drawRoutes(routes);
+                renderRouteOptions(routeOptions);
 
                 document.getElementById("crime-stats").innerHTML = `
                     <strong>Crime Stats Loaded:</strong><br>
-                    ${crimes.length} incidents loaded near this route.
+                    ${mockCrimes.length} incidents near this route.
                 `;
 
             } catch (err) {
@@ -234,39 +222,34 @@
             }
         }
 
-        function displayRoutes(options, shortestIndex, quickestIndex, safestIndex) {
-            const box = document.getElementById("routes");
+        function renderRouteOptions(options) {
+            const div = document.getElementById("routes");
             let html = "";
 
-            options.forEach(opt => {
-                let label = `Route ${opt.i + 1}`;
-                if (opt.i === shortestIndex) label += " (Shortest)";
-                if (opt.i === quickestIndex) label += " (Quickest)";
-                if (opt.i === safestIndex) label += " (Safest)";
-
+            options.forEach(o => {
                 html += `
-                    <div class="route-option" onclick="selectRoute(${opt.i})">
-                        <strong>${label}</strong><br>
-                        Distance: ${opt.dist.toFixed(1)} km | 
-                        Time: ${opt.time.toFixed(1)} min | 
-                        Crimes nearby: ${opt.safety}
+                    <div class="route-option" onclick="selectRoute(${o.index})">
+                        <strong>Route ${o.index + 1}</strong><br>
+                        Distance: ${o.distance.toFixed(1)} km<br>
+                        Time: ${o.time.toFixed(1)} min<br>
+                        Crimes Nearby: ${o.safety}
                     </div>
                 `;
             });
 
-            box.innerHTML = html;
+            div.innerHTML = html;
         }
 
         function selectRoute(index) {
-            routes.forEach((r, i) => {
-                r.setStyle({
+            routeLayers.forEach((layer, i) => {
+                layer.setStyle({
                     color: i === index ? "#e74c3c" : "#3498db",
                     weight: i === index ? 7 : 5
                 });
             });
 
-            document.querySelectorAll(".route-option").forEach((el, i) => {
-                el.classList.toggle("selected", i === index);
+            document.querySelectorAll(".route-option").forEach((opt, i) => {
+                opt.classList.toggle("selected", i === index);
             });
         }
 
@@ -274,3 +257,4 @@
     </script>
 </body>
 </html>
+
